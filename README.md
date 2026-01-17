@@ -4,6 +4,7 @@ Pi extension for delegating tasks to subagents with async support, chain clarifi
 
 ## Features (beyond base)
 
+- **Parallel-in-Chain**: Fan-out/fan-in patterns with `{ parallel: [...] }` steps within chains
 - **Chain Clarification TUI**: Interactive preview/edit of chain templates and behaviors before execution
 - **Agent Frontmatter Extensions**: Agents declare default chain behavior (`output`, `defaultReads`, `defaultProgress`)
 - **Chain Artifacts**: Shared directory at `/tmp/pi-chain-runs/{runId}/` for inter-step files
@@ -24,7 +25,7 @@ Pi extension for delegating tasks to subagents with async support, chain clarifi
 | Chain | Yes* | `{ chain: [{agent, task}...] }` with `{task}`, `{previous}`, `{chain_dir}` variables |
 | Parallel | Sync only | `{ tasks: [{agent, task}...] }` - auto-downgrades if async requested |
 
-*Chain defaults to sync with TUI clarification. Use `clarify: false` to enable async.
+*Chain defaults to sync with TUI clarification. Use `clarify: false` to enable async (sequential-only chains; parallel-in-chain requires sync mode).
 
 ## Usage
 
@@ -54,6 +55,26 @@ Pi extension for delegating tasks to subagents with async support, chain clarifi
   { agent: "scout", task: "find issues", output: false },  // text-only, no file
   { agent: "worker", progress: false }  // disable progress tracking
 ]}
+
+// Chain with parallel step (fan-out/fan-in)
+{ chain: [
+  { agent: "scout", task: "Gather context for the codebase" },
+  { parallel: [
+    { agent: "worker", task: "Implement auth based on {previous}" },
+    { agent: "worker", task: "Implement API based on {previous}" }
+  ]},
+  { agent: "reviewer", task: "Review all changes from {previous}" }
+]}
+
+// Parallel step with options
+{ chain: [
+  { agent: "scout", task: "Find all modules" },
+  { parallel: [
+    { agent: "worker", task: "Refactor module A" },
+    { agent: "worker", task: "Refactor module B" },
+    { agent: "worker", task: "Refactor module C" }
+  ], concurrency: 2, failFast: true }  // limit concurrency, stop on first failure
+]}
 ```
 
 **subagent_status tool:**
@@ -81,7 +102,9 @@ Pi extension for delegating tasks to subagents with async support, chain clarifi
 | `share` | boolean | true | Create shareable session log |
 | `sessionDir` | string | temp | Directory to store session logs |
 
-**ChainItem fields:**
+**ChainItem** can be either a sequential step or a parallel step:
+
+*Sequential step fields:*
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -91,6 +114,25 @@ Pi extension for delegating tasks to subagents with async support, chain clarifi
 | `output` | `string \| false` | agent default | Override output filename or disable |
 | `reads` | `string[] \| false` | agent default | Override files to read from chain dir |
 | `progress` | boolean | agent default | Override progress.md tracking |
+
+*Parallel step fields:*
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `parallel` | ParallelTask[] | required | Array of tasks to run concurrently |
+| `concurrency` | number | 4 | Max concurrent tasks |
+| `failFast` | boolean | false | Stop remaining tasks on first failure |
+
+*ParallelTask fields:* (same as sequential step)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `agent` | string | required | Agent name |
+| `task` | string | `{previous}` | Task template |
+| `cwd` | string | - | Override working directory |
+| `output` | `string \| false` | agent default | Override output (namespaced to parallel-N/M-agent/) |
+| `reads` | `string[] \| false` | agent default | Override files to read |
+| `progress` | boolean | agent default | Override progress tracking |
 
 Status tool:
 
@@ -124,8 +166,20 @@ Templates support three variables:
 | Variable | Description |
 |----------|-------------|
 | `{task}` | Original task from first step (use in subsequent steps) |
-| `{previous}` | Output from prior step |
+| `{previous}` | Output from prior step (or aggregated outputs from parallel step) |
 | `{chain_dir}` | Path to chain artifacts directory |
+
+**Parallel output aggregation:** When a parallel step completes, all outputs are concatenated with clear separators:
+
+```
+=== Parallel Task 1 (worker) ===
+[output from first task]
+
+=== Parallel Task 2 (worker) ===
+[output from second task]
+```
+
+This aggregated output becomes `{previous}` for the next step.
 
 ## Chain Directory
 
@@ -133,6 +187,9 @@ Each chain run creates `/tmp/pi-chain-runs/{runId}/` containing:
 - `context.md` - Scout/context-builder output
 - `plan.md` - Planner output  
 - `progress.md` - Worker/reviewer shared progress
+- `parallel-{stepIndex}/` - Subdirectories for parallel step outputs
+  - `0-{agent}/output.md` - First parallel task output
+  - `1-{agent}/output.md` - Second parallel task output
 - Additional files as written by agents
 
 Directories older than 24 hours are cleaned up on extension startup.

@@ -42,6 +42,68 @@ export interface StepOverrides {
 }
 
 // =============================================================================
+// Chain Step Types
+// =============================================================================
+
+/** Sequential step: single agent execution */
+export interface SequentialStep {
+	agent: string;
+	task?: string;
+	cwd?: string;
+	output?: string | false;
+	reads?: string[] | false;
+	progress?: boolean;
+}
+
+/** Parallel task item within a parallel step */
+export interface ParallelTaskItem {
+	agent: string;
+	task?: string;
+	cwd?: string;
+	output?: string | false;
+	reads?: string[] | false;
+	progress?: boolean;
+}
+
+/** Parallel step: multiple agents running concurrently */
+export interface ParallelStep {
+	parallel: ParallelTaskItem[];
+	concurrency?: number;
+	failFast?: boolean;
+}
+
+/** Union type for chain steps */
+export type ChainStep = SequentialStep | ParallelStep;
+
+// =============================================================================
+// Type Guards
+// =============================================================================
+
+export function isParallelStep(step: ChainStep): step is ParallelStep {
+	return "parallel" in step && Array.isArray((step as ParallelStep).parallel);
+}
+
+export function isSequentialStep(step: ChainStep): step is SequentialStep {
+	return "agent" in step && !("parallel" in step);
+}
+
+/** Get all agent names in a step (single for sequential, multiple for parallel) */
+export function getStepAgents(step: ChainStep): string[] {
+	if (isParallelStep(step)) {
+		return step.parallel.map((t) => t.agent);
+	}
+	return [step.agent];
+}
+
+/** Get total task count in a step */
+export function getStepTaskCount(step: ChainStep): number {
+	if (isParallelStep(step)) {
+		return step.parallel.length;
+	}
+	return 1;
+}
+
+// =============================================================================
 // Settings Management
 // =============================================================================
 
@@ -148,6 +210,75 @@ export function resolveChainTemplates(
 }
 
 // =============================================================================
+// Parallel-Aware Template Resolution
+// =============================================================================
+
+/** Resolved templates for a chain - string for sequential, string[] for parallel */
+export type ResolvedTemplates = (string | string[])[];
+
+/**
+ * Resolve templates for a chain with parallel step support.
+ * Returns string for sequential steps, string[] for parallel steps.
+ */
+export function resolveChainTemplatesV2(
+	steps: ChainStep[],
+	settings: SubagentSettings,
+): ResolvedTemplates {
+	return steps.map((step, i) => {
+		if (isParallelStep(step)) {
+			// Parallel step: resolve each task's template
+			return step.parallel.map((task) => {
+				if (task.task) return task.task;
+				// Default for parallel tasks is {previous}
+				return "{previous}";
+			});
+		}
+		// Sequential step: existing logic
+		const seq = step as SequentialStep;
+		if (seq.task) return seq.task;
+		// Default: first step uses {task}, others use {previous}
+		return i === 0 ? "{task}" : "{previous}";
+	});
+}
+
+/**
+ * Flatten templates for display (TUI navigation needs flat list)
+ */
+export function flattenTemplates(templates: ResolvedTemplates): string[] {
+	const result: string[] = [];
+	for (const t of templates) {
+		if (Array.isArray(t)) {
+			result.push(...t);
+		} else {
+			result.push(t);
+		}
+	}
+	return result;
+}
+
+/**
+ * Unflatten templates back to structured form
+ */
+export function unflattenTemplates(
+	flat: string[],
+	steps: ChainStep[],
+): ResolvedTemplates {
+	const result: ResolvedTemplates = [];
+	let idx = 0;
+	for (const step of steps) {
+		if (isParallelStep(step)) {
+			const count = step.parallel.length;
+			result.push(flat.slice(idx, idx + count));
+			idx += count;
+		} else {
+			result.push(flat[idx]!);
+			idx++;
+		}
+	}
+	return result;
+}
+
+// =============================================================================
 // Behavior Resolution
 // =============================================================================
 
@@ -236,4 +367,104 @@ export function buildChainInstructions(
 	return (
 		"\n\n---\n**Chain Instructions:**\n" + instructions.map((i) => `- ${i}`).join("\n")
 	);
+}
+
+// =============================================================================
+// Parallel Step Support
+// =============================================================================
+
+/**
+ * Resolve behaviors for all tasks in a parallel step.
+ * Creates namespaced output paths to avoid collisions.
+ */
+export function resolveParallelBehaviors(
+	tasks: ParallelTaskItem[],
+	agentConfigs: AgentConfig[],
+	stepIndex: number,
+): ResolvedStepBehavior[] {
+	return tasks.map((task, taskIndex) => {
+		const config = agentConfigs.find((a) => a.name === task.agent);
+		if (!config) {
+			throw new Error(`Unknown agent: ${task.agent}`);
+		}
+
+		// Build subdirectory path for this parallel task
+		const subdir = `parallel-${stepIndex}/${taskIndex}-${task.agent}`;
+
+		// Output: task override > agent default (namespaced) > false
+		let output: string | false = false;
+		if (task.output !== undefined) {
+			output = task.output === false ? false : `${subdir}/${task.output}`;
+		} else if (config.output) {
+			output = `${subdir}/${config.output}`;
+		}
+
+		// Reads: task override > agent default > false
+		const reads =
+			task.reads !== undefined ? task.reads : config.defaultReads ?? false;
+
+		// Progress: task override > agent default > false
+		const progress =
+			task.progress !== undefined
+				? task.progress
+				: config.defaultProgress ?? false;
+
+		return { output, reads, progress };
+	});
+}
+
+/**
+ * Create subdirectories for parallel step outputs
+ */
+export function createParallelDirs(
+	chainDir: string,
+	stepIndex: number,
+	taskCount: number,
+	agentNames: string[],
+): void {
+	for (let i = 0; i < taskCount; i++) {
+		const subdir = path.join(chainDir, `parallel-${stepIndex}`, `${i}-${agentNames[i]}`);
+		fs.mkdirSync(subdir, { recursive: true });
+	}
+}
+
+/** Result from a parallel task (simplified for aggregation) */
+export interface ParallelTaskResult {
+	agent: string;
+	taskIndex: number;
+	output: string;
+	exitCode: number;
+	error?: string;
+}
+
+/**
+ * Aggregate outputs from parallel tasks into a single string for {previous}.
+ * Uses clear separators so the next agent can parse all outputs.
+ */
+export function aggregateParallelOutputs(results: ParallelTaskResult[]): string {
+	return results
+		.map((r, i) => {
+			const header = `=== Parallel Task ${i + 1} (${r.agent}) ===`;
+			return `${header}\n${r.output}`;
+		})
+		.join("\n\n");
+}
+
+/**
+ * Check if any parallel task failed
+ */
+export function hasParallelFailures(results: ParallelTaskResult[]): boolean {
+	return results.some((r) => r.exitCode !== 0);
+}
+
+/**
+ * Get failure summary for parallel step
+ */
+export function getParallelFailureSummary(results: ParallelTaskResult[]): string {
+	const failures = results.filter((r) => r.exitCode !== 0);
+	if (failures.length === 0) return "";
+
+	return failures
+		.map((f) => `- Task ${f.taskIndex + 1} (${f.agent}): ${f.error || "failed"}`)
+		.join("\n");
 }
