@@ -12,6 +12,7 @@
 ### Changed
 - TUI clarification skipped for chains with parallel steps (runs directly in sync mode)
 - Async mode rejects chains with parallel steps with clear error message
+- Chain completion now returns summary blurb with progress.md and artifacts paths instead of raw output
 
 ### Added
 - Live progress display for sync subagents (single and chain modes)

@@ -199,6 +199,41 @@ function formatDuration(ms: number): string {
 	return `${Math.floor(ms / 60000)}m${Math.floor((ms % 60000) / 1000)}s`;
 }
 
+function buildChainSummary(
+	steps: ChainStep[],
+	results: SingleResult[],
+	chainDir: string,
+	status: "completed" | "failed",
+	failedStep?: { index: number; error: string },
+): string {
+	// Build step names for display
+	const stepNames = steps
+		.map((s) => (isParallelStep(s) ? `parallel[${s.parallel.length}]` : (s as SequentialStep).agent))
+		.join(" → ");
+
+	// Calculate total duration from results
+	const totalDuration = results.reduce((sum, r) => sum + (r.progress?.durationMs || 0), 0);
+	const durationStr = formatDuration(totalDuration);
+
+	// Check for progress.md
+	const progressPath = path.join(chainDir, "progress.md");
+	const hasProgress = fs.existsSync(progressPath);
+
+	if (status === "completed") {
+		return `✅ Chain completed: ${stepNames} (${results.length} steps, ${durationStr})
+
+📋 Progress: ${hasProgress ? progressPath : "(none)"}
+📁 Artifacts: ${chainDir}`;
+	} else {
+		const stepInfo = failedStep ? ` at step ${failedStep.index + 1}` : "";
+		const errorInfo = failedStep?.error ? `: ${failedStep.error}` : "";
+		return `❌ Chain failed${stepInfo}${errorInfo}
+
+📋 Progress: ${hasProgress ? progressPath : "(none)"}
+📁 Artifacts: ${chainDir}`;
+	}
+}
+
 function readStatus(asyncDir: string): AsyncStatus | null {
 	const statusPath = path.join(asyncDir, "status.json");
 	if (!fs.existsSync(statusPath)) return null;
@@ -1433,8 +1468,13 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 							const failureSummary = failures
 								.map((f) => `- Task ${f.originalIndex + 1} (${f.agent}): ${f.error || "failed"}`)
 								.join("\n");
+							const errorMsg = `Parallel step ${stepIndex + 1} failed:\n${failureSummary}`;
+							const summary = buildChainSummary(chainSteps, results, chainDir, "failed", {
+								index: stepIndex,
+								error: errorMsg,
+							});
 							return {
-								content: [{ type: "text", text: `Parallel step ${stepIndex + 1} failed:\n${failureSummary}` }],
+								content: [{ type: "text", text: summary }],
 								details: {
 									mode: "chain",
 									results,
@@ -1523,8 +1563,12 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 
 						// On failure, leave chain_dir for debugging
 						if (r.exitCode !== 0) {
+							const summary = buildChainSummary(chainSteps, results, chainDir, "failed", {
+								index: stepIndex,
+								error: r.error || "Chain failed",
+							});
 							return {
-								content: [{ type: "text", text: r.error || "Chain failed" }],
+								content: [{ type: "text", text: summary }],
 								details: {
 									mode: "chain",
 									results,
@@ -1539,31 +1583,17 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 					}
 				}
 
-				// Chain complete - return final output
+				// Chain complete - return summary with paths
 				// Chain dir left for inspection (cleaned up after 24h)
-				let finalOutput = prev;
-				let truncationInfo: Details["truncation"];
-				if (params.maxOutput) {
-					const maxOutputConfig = { ...DEFAULT_MAX_OUTPUT, ...params.maxOutput };
-					const outputPath = allArtifactPaths[allArtifactPaths.length - 1]?.outputPath;
-					const truncResult = truncateOutput(prev, maxOutputConfig, outputPath);
-					if (truncResult.truncated) {
-						finalOutput = truncResult.text;
-						truncationInfo = truncResult;
-					}
-				}
-
-				// Append chain dir info to output
-				finalOutput += `\n\n📁 Chain artifacts: ${chainDir}`;
+				const summary = buildChainSummary(chainSteps, results, chainDir, "completed");
 
 				return {
-					content: [{ type: "text", text: finalOutput || "(no output)" }],
+					content: [{ type: "text", text: summary }],
 					details: {
 						mode: "chain",
 						results,
 						progress: params.includeProgress ? allProgress : undefined,
 						artifacts: allArtifactPaths.length ? { dir: artifactsDir, files: allArtifactPaths } : undefined,
-						truncation: truncationInfo,
 					},
 				};
 			}
