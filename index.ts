@@ -569,9 +569,14 @@ Example: { chain: [{agent:"scout", task:"Analyze {task}"}, {agent:"planner", tas
 					output += `\n\n📄 Output saved to: ${outputPath}`;
 				}
 
-				if (r.exitCode !== 0)
+				if (r.exitCode !== 0) {
+					// Even when the underlying run fails, the agent may still have produced useful output
+					// (e.g., it hit a non-fatal tool error). Include it so callers don't have to dig into
+					// artifacts/session logs to see what happened.
+					const errText = r.error || "Failed";
+					const combined = output ? `${errText}\n\n---\n\n${output}` : errText;
 					return {
-						content: [{ type: "text", text: r.error || "Failed" }],
+						content: [{ type: "text", text: combined }],
 						details: {
 							mode: "single",
 							results: [r],
@@ -581,6 +586,7 @@ Example: { chain: [{agent:"scout", task:"Analyze {task}"}, {agent:"planner", tas
 						},
 						isError: true,
 					};
+				}
 				return {
 					content: [{ type: "text", text: output || "(no output)" }],
 					details: {

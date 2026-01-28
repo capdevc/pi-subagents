@@ -187,55 +187,66 @@ export function getDisplayItems(messages: Message[]): DisplayItem[] {
  * Detect errors in subagent execution from messages
  */
 export function detectSubagentError(messages: Message[]): ErrorInfo {
-	for (const msg of messages) {
-		if (msg.role === "toolResult" && (msg as any).isError) {
-			const text = msg.content.find((c) => c.type === "text");
-			const details = text && "text" in text ? text.text : undefined;
-			const exitMatch = details?.match(/exit(?:ed)?\s*(?:with\s*)?(?:code|status)?\s*[:\s]?\s*(\d+)/i);
-			return {
-				hasError: true,
-				exitCode: exitMatch ? parseInt(exitMatch[1], 10) : 1,
-				errorType: (msg as any).toolName || "tool",
-				details: details?.slice(0, 200),
-			};
+	// Subagents can often recover from tool errors (bad grep, missing file, etc.).
+	// We only treat a tool error as fatal if the run did not produce any final
+	// assistant text *after* the error (i.e., the error was unrecovered).
+	let lastAssistantTextIdx = -1;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg = messages[i];
+		if (msg.role !== "assistant") continue;
+		const hasText = msg.content?.some(
+			(p: any) => p?.type === "text" && typeof p.text === "string" && p.text.trim().length > 0,
+		);
+		if (hasText) {
+			lastAssistantTextIdx = i;
+			break;
 		}
 	}
 
-	for (const msg of messages) {
-		if (msg.role !== "toolResult") continue;
-		const toolName = (msg as any).toolName;
-		if (toolName !== "bash") continue;
-
+	let lastToolErrorIdx = -1;
+	let lastToolError: { toolName: string; details?: string } | null = null;
+	for (let i = 0; i < messages.length; i++) {
+		const msg = messages[i];
+		if (msg.role !== "toolResult" || !(msg as any).isError) continue;
+		const toolName = (msg as any).toolName || "tool";
 		const text = msg.content.find((c) => c.type === "text");
-		if (!text || !("text" in text)) continue;
-		const output = text.text;
-
-		const exitMatch = output.match(/exit(?:ed)?\s*(?:with\s*)?(?:code|status)?\s*[:\s]?\s*(\d+)/i);
-		if (exitMatch) {
-			const code = parseInt(exitMatch[1], 10);
-			if (code !== 0) {
-				return { hasError: true, exitCode: code, errorType: "bash", details: output.slice(0, 200) };
-			}
-		}
-
-		const errorPatterns = [
-			/command not found/i,
-			/permission denied/i,
-			/no such file or directory/i,
-			/segmentation fault/i,
-			/killed|terminated/i,
-			/out of memory/i,
-			/connection refused/i,
-			/timeout/i,
-		];
-		for (const pattern of errorPatterns) {
-			if (pattern.test(output)) {
-				return { hasError: true, exitCode: 1, errorType: "bash", details: output.slice(0, 200) };
-			}
-		}
+		const details = text && "text" in text ? text.text : undefined;
+		lastToolErrorIdx = i;
+		lastToolError = { toolName, details };
 	}
 
-	return { hasError: false };
+	if (lastToolErrorIdx === -1) return { hasError: false };
+
+	// If there is no assistant text at all, treat it as a failure.
+	// If the last tool error happened *after* the last assistant text, treat it as unrecovered.
+	const unrecovered = lastAssistantTextIdx === -1 || lastToolErrorIdx > lastAssistantTextIdx;
+	if (!unrecovered) return { hasError: false };
+
+	const details = lastToolError?.details;
+	const exitMatch = details?.match(/exit(?:ed)?\s*(?:with\s*)?(?:code|status)?\s*[:\s]?\s*(\d+)/i);
+	return {
+		hasError: true,
+		exitCode: exitMatch ? parseInt(exitMatch[1], 10) : 1,
+		errorType: lastToolError?.toolName || "tool",
+		details: details?.slice(0, 200),
+	};
+}
+
+/**
+ * Collect non-fatal tool errors for observability.
+ */
+export function collectToolErrorWarnings(messages: Message[], max: number = 10): string[] {
+	const warnings: string[] = [];
+	for (const msg of messages) {
+		if (msg.role !== "toolResult" || !(msg as any).isError) continue;
+		const toolName = (msg as any).toolName || "tool";
+		const text = msg.content.find((c) => c.type === "text");
+		const details = text && "text" in text ? text.text : "";
+		const line = details ? `${toolName}: ${details}` : `${toolName}: (tool error)`;
+		warnings.push(line.slice(0, 240));
+		if (warnings.length >= max) break;
+	}
+	return warnings;
 }
 
 /**

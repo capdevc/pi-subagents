@@ -86,6 +86,8 @@ export interface SingleResult {
 	usage: Usage;
 	model?: string;
 	error?: string;
+	/** Non-fatal tool errors or other diagnostic warnings that occurred during the run. */
+	warnings?: string[];
 	sessionFile?: string;
 	skills?: string[];
 	skillsWarning?: string;

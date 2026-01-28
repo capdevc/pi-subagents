@@ -28,6 +28,7 @@ import {
 	writePrompt,
 	getFinalOutput,
 	findLatestSessionFile,
+	collectToolErrorWarnings,
 	detectSubagentError,
 	extractToolArgsPreview,
 	extractTextFromContent,
@@ -317,6 +318,12 @@ export async function runSync(
 	if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
 	result.exitCode = exitCode;
 
+	// Collect tool error warnings for observability regardless of overall success.
+	result.warnings = collectToolErrorWarnings(result.messages);
+
+	// Decide if the run should be considered failed due to an unrecovered tool error.
+	// We only do this when the underlying runner succeeded (exitCode==0) and there
+	// wasn't already a hard error.
 	if (exitCode === 0 && !result.error) {
 		const errInfo = detectSubagentError(result.messages);
 		if (errInfo.hasError) {
